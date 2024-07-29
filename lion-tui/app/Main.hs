@@ -5,7 +5,6 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE PartialTypeSignatures #-}
@@ -34,26 +33,32 @@ import Brick.Widgets.Core
   , str
   , visible
   , viewport
-  , withDefAttr, strWrap, strWrapWith, withVScrollBars
+  , withDefAttr, strWrapWith, withVScrollBars
   )
 import qualified Brick.Widgets.Center as C
 import qualified Brick.Widgets.Edit as E
 import qualified Brick.AttrMap as A
 import Brick.Util (on, fg)
 
-import Lion.Rvfi (Rvfi(..), RvfiCsr, mkRvfi)
-import Data.Text (Text)
 import Brick.Widgets.Table
 import GHC.TypeLits (KnownSymbol, symbolVal, KnownNat)
 import Clash.NamedTypes
 import Data.Data (Proxy(..))
-import Clash.Prelude (Symbol)
+import Clash.Prelude (Signal, BitVector, HiddenClockResetEnable)
+import Clash.Signal (signalAutomaton)
 import Text.Wrap
-import Lion.Rvfi (RvfiCsr(..))
+    ( WrapSettings(..),
+      FillStrategy(FillIndent),
+      defaultWrapSettings )
+import Lion.Rvfi (Rvfi(..), mkRvfi, RvfiCsr(..))
 import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, (<=>))
 import GHC.Word (Word32)
 import Data.Vector.Mutable (IOVector)
 import Data.Vector.Mutable qualified as MV
+import Lion.Core (core, FromCore(..), defaultCoreConfig, ToMem(..))
+import Clash.Explicit.Prelude (System)
+import Control.Arrow.Transformer.Automaton (Automaton (Automaton))
+import Control.Monad.IO.Class (MonadIO (..))
 
 data Name = Edit
           | EditLines
@@ -61,18 +66,21 @@ data Name = Edit
           deriving (Ord, Show, Eq)
 
 data St = St
-  { _edit :: E.Editor String Name
-  , _rvfi :: Rvfi
-  , _memVec :: IOVector Word32
+  { _edit      :: E.Editor String Name
+  , _automaton :: Automaton (->) (BitVector 32) (Maybe ToMem, Rvfi)
+  , _rvfi      :: Rvfi
+  , _memVec    :: IOVector Word32
+  , _memResult :: BitVector 32
+  , _toMem     :: Maybe ToMem
   }
 makeLenses ''St
 
 drawUI :: St -> [T.Widget Name]
-drawUI st = [rvfi]
+drawUI st = [rvfiView]
     where
-        e = renderWithLineNumbers (st^.edit)
-        ui = C.center . hLimit 50 . vLimit 10
-        rvfi = withVScrollBars OnRight
+        _e = renderWithLineNumbers (st^.edit)
+        _ui = C.center . hLimit 50 . vLimit 10
+        rvfiView = withVScrollBars OnRight
              $ viewport RvfiView Vertical
              $ drawRvfi (_rvfi st)
 
@@ -216,6 +224,21 @@ rvfiScroll :: ViewportScroll Name
 rvfiScroll = viewportScroll RvfiView
 
 appEvent :: T.BrickEvent Name e -> T.EventM Name St ()
+appEvent (T.VtyEvent (V.EvKey (V.KChar ' ') [])) = do
+  Automaton coreFun <- T.gets _automaton
+  memRes <- T.gets _memResult
+  let ((tmem, rvfi'), at')  = coreFun memRes
+  rvfi .= rvfi'
+  automaton .= at'
+
+  case tmem of
+    Just tm -> do
+      st <- T.get
+      st' <- handleToMem tm st
+      T.put st'
+    Nothing -> pure ()
+
+  pure ()
 appEvent (T.VtyEvent (V.EvKey V.KEsc [])) =
     M.halt
 appEvent (T.VtyEvent (V.EvKey V.KDown []))   = M.vScrollBy rvfiScroll 1
@@ -226,7 +249,13 @@ appEvent ev = do
 initialiseState :: Int -> IO St
 initialiseState memlen = do
     v <- MV.replicate memlen 0
-    pure $ St (E.editor Edit Nothing "") mkRvfi v
+    pure $ St
+      (E.editor Edit Nothing "")
+      (signalAutomaton @System expandCore)
+      mkRvfi
+      v
+      0
+      Nothing
 
 lineNumberAttr :: A.AttrName
 lineNumberAttr = A.attrName "lineNumber"
@@ -251,7 +280,31 @@ theApp =
           , M.appAttrMap = const theMap
           }
 
+expandCore
+  :: HiddenClockResetEnable dom
+  => Signal dom (BitVector 32)
+  -> Signal dom (Maybe ToMem, Rvfi)
+expandCore =
+  (\(FromCore a b) -> (,) <$> a <*> b )
+  <$> core defaultCoreConfig
+
+handleToMem :: MonadIO m => ToMem -> St -> m St
+handleToMem ToMem{..} st = do
+  let mem = _memVec st
+  val <- case memWrite of
+    Nothing
+      |  memAddress >= 0
+      && fromIntegral memAddress < MV.length mem
+      -> liftIO $ MV.read (_memVec st) (fromIntegral memAddress)
+    Just wr
+      |  memAddress >= 0
+      && fromIntegral memAddress < MV.length mem
+      -> 0 <$ liftIO (MV.write mem (fromIntegral memAddress) (fromIntegral wr))
+    _ -> pure 0
+  pure st {_memResult = fromIntegral val}
+
 main :: IO ()
 main = do
     initialState <- initialiseState 1024
+    let _ = signalAutomaton @System expandCore
     void $ M.defaultMain theApp initialState
