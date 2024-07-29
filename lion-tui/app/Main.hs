@@ -51,11 +51,11 @@ import Text.Wrap
       FillStrategy(FillIndent),
       defaultWrapSettings )
 import Lion.Rvfi (Rvfi(..), mkRvfi, RvfiCsr(..))
-import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, (<=>))
+import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, (<=>), padBottom, Padding (..))
 import GHC.Word (Word32)
 import Data.Vector.Mutable (IOVector)
 import Data.Vector.Mutable qualified as MV
-import Lion.Core (core, FromCore(..), defaultCoreConfig, ToMem(..))
+import Lion.Core (core, FromCore(..), defaultCoreConfig, ToMem(..), MemoryAccess(..))
 import Clash.Explicit.Prelude (System)
 import Control.Arrow.Transformer.Automaton (Automaton (Automaton))
 import Control.Monad.IO.Class (MonadIO (..))
@@ -71,7 +71,7 @@ data St = St
   , _rvfi      :: Rvfi
   , _memVec    :: IOVector Word32
   , _memResult :: BitVector 32
-  , _toMem     :: Maybe ToMem
+  , _memOut    :: Maybe ToMem
   }
 makeLenses ''St
 
@@ -82,24 +82,27 @@ drawUI st = [rvfiView]
         _ui = C.center . hLimit 50 . vLimit 10
         rvfiView = withVScrollBars OnRight
              $ viewport RvfiView Vertical
-             $ drawRvfi (_rvfi st)
+             $ drawRvfi st
 
-drawRvfi :: Rvfi -> T.Widget Name
+drawRvfi :: St -> T.Widget Name
 drawRvfi = drawRvfiTable
 
-keyValTable :: Table n -> Table n
-keyValTable =
+keyValTable :: Bool -> Table n -> Table n
+keyValTable surround =
    alignRight 0
   . alignLeft 1
   . rowBorders True
   . columnBorders True
-  . surroundingBorder True
+  . surroundingBorder surround
 
-drawRvfiTable :: Rvfi -> T.Widget Name
-drawRvfiTable Rvfi{..} = renderTable
-  . keyValTable
+drawRvfiTable :: St -> T.Widget Name
+drawRvfiTable St{_rvfi = Rvfi{..}, ..}  =
+  (renderTable
+  . keyValTable True
   $ table
-    [ drawRow @"valid"     52 _rvfiValid
+    [ drawToMem _memOut
+    , drawRow @"FromMem"   52 _memResult
+    , drawRow @"valid"     52 _rvfiValid
     , drawRow @"order"     42 _rvfiOrder
     , drawRow @"insn"      52 _rvfiInsn
     , drawRow @"trap"      52 _rvfiTrap
@@ -120,28 +123,50 @@ drawRvfiTable Rvfi{..} = renderTable
     , drawRow @"mem_wmask" 52 _rvfiMemWMask
     , drawRow @"mem_rdata" 52 _rvfiMemRData
     , drawRow @"mem_wdata" 52 _rvfiMemWData
-    , drawRvfiCsr @"csr_minstret" _rvfiCsrMinstret
+    ]
+  )
+  <+>
+  ( renderTable
+  . keyValTable True
+  $ table
+    [ drawRvfiCsr @"csr_minstret" _rvfiCsrMinstret
     , drawRvfiCsr @"csr_mcycle" _rvfiCsrMcycle
     , drawRvfiCsr @"csr_mscratch" _rvfiCsrMscratch
     , drawRvfiCsr @"csr_mstatus" _rvfiCsrMstatus
     , drawRvfiCsr @"csr_misa" _rvfiCsrMisa
     ]
+    )
 
 drawRvfiCsr :: forall l n. (KnownSymbol l,KnownNat n) => RvfiCsr n -> [T.Widget Name]
 drawRvfiCsr RvfiCsr{..} =
-  [ str ""
-  , str (symbolVal @l Proxy)
-  <=> (renderTable
-      . keyValTable
-      $ table
-        [ drawRow @"wdata" 42 _wdataCsr
-        , drawRow @"rdata" 42 _rdataCsr
-        , drawRow @"wmask" 42 _wmaskCsr
-        , drawRow @"rmask" 42 _rmaskCsr
-        ]
-      )
+  [ str (symbolVal @l Proxy)
+  , renderTable
+    . keyValTable False
+    $ table
+      [ drawRow @"wdata" 42 _wdataCsr
+      , drawRow @"rdata" 42 _rdataCsr
+      , drawRow @"wmask" 42 _wmaskCsr
+      , drawRow @"rmask" 42 _rmaskCsr
+      ]
   ]
 
+drawToMem :: Maybe ToMem -> [T.Widget Name]
+drawToMem Nothing =
+  [ str "ToMem"
+  , padBottom (Pad 5) $ str "(none)"
+  ]
+drawToMem (Just (ToMem{..})) =
+  [ str "ToMem"
+  , renderTable
+      . keyValTable False
+      $ table
+        [ [str "memAccess",   str (show memAccess)]
+        , [str "memAddress",  str (show memAddress)]
+        , [str "memByteMask", str (show memByteMask)]
+        , [str "memWrite",    str (show memWrite)]
+        ]
+
+  ]
 
 newtype Named (name :: k) a = Named a
 
@@ -228,7 +253,8 @@ appEvent (T.VtyEvent (V.EvKey (V.KChar ' ') [])) = do
   Automaton coreFun <- T.gets _automaton
   memRes <- T.gets _memResult
   let ((tmem, rvfi'), at')  = coreFun memRes
-  rvfi .= rvfi'
+  rvfi   .= rvfi'
+  memOut .= tmem
   automaton .= at'
 
   case tmem of
