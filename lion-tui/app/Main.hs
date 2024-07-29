@@ -153,7 +153,7 @@ drawRvfiCsr RvfiCsr{..} =
 drawToMem :: Maybe ToMem -> [T.Widget Name]
 drawToMem Nothing =
   [ str "ToMem"
-  , padBottom (Pad 5) $ str "(none)"
+  , padBottom (Pad 7) $ str "(none)"
   ]
 drawToMem (Just (ToMem{..})) =
   [ str "ToMem"
