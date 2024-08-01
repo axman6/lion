@@ -14,7 +14,7 @@
 
 module Main where
 
-import Control.Monad (void, when)
+import Control.Monad (void, when, forM_)
 import Lens.Micro
 import Lens.Micro.TH
 import Lens.Micro.Mtl
@@ -61,6 +61,10 @@ import Control.Arrow.Transformer.Automaton (Automaton (Automaton))
 import Control.Monad.IO.Class (MonadIO (..))
 import Lion.Instruction (parseInstr)
 import Data.Bits (Bits(..))
+import System.Environment (getArgs)
+import Data.ByteString qualified as BS
+import Data.ByteString (ByteString)
+import Numeric (showHex)
 
 data Name = Edit
           | EditLines
@@ -104,6 +108,8 @@ drawRvfiTable St{_rvfi = Rvfi{..}, ..}  =
   $ table
     [ drawToMem _memOut
     , drawRow @"FromMem"   52 _memResult
+    , [str "FromMem",    str (toHex _memResult)]
+    , [str "FromMem",    str (show $ fromIntegral @_ @Integer _memResult)]
     , drawRow @"valid"     52 _rvfiValid
     , drawRow @"order"     42 _rvfiOrder
     , drawRow @"insn"      52 _rvfiInsn
@@ -166,10 +172,17 @@ drawToMem (Just (ToMem{..})) =
         [ [str "memAccess",   str (show memAccess)]
         , [str "memAddress",  str (show memAddress)]
         , [str "memByteMask", str (show memByteMask)]
-        , [str "memWrite",    str (show memWrite)]
+        , [str "memWrite",    str (maybe "" show memWrite)]
+        , [str "memWrite",    str (toHex' memWrite)]
+        , [str "memWrite",    str (maybe "" (show . fromIntegral @_ @Integer) memWrite)]
         ]
-
   ]
+
+toHex :: Integral a => a -> String
+toHex i = "0x" ++ showHex (fromIntegral i :: Integer) ""
+
+toHex' :: Integral a => Maybe a -> String
+toHex' = maybe "" toHex
 
 newtype Named (name :: k) a = Named a
 
@@ -264,8 +277,8 @@ appEvent (T.VtyEvent (V.EvKey (V.KChar ' ') [])) = do
   Automaton coreFun <- T.gets _automaton
   memRes <- T.gets _memResult
   let ((tmem, rvfi'), at')  = coreFun memRes
-  rvfi   .= rvfi'
-  memOut .= tmem
+  rvfi      .= rvfi'
+  memOut    .= tmem
   automaton .= at'
 
   case tmem of
@@ -278,14 +291,23 @@ appEvent (T.VtyEvent (V.EvKey (V.KChar ' ') [])) = do
   pure ()
 appEvent (T.VtyEvent (V.EvKey V.KEsc [])) =
     M.halt
+appEvent (T.VtyEvent (V.EvKey (V.KChar 'q') [])) =
+    M.halt
 appEvent (T.VtyEvent (V.EvKey V.KDown []))   = M.vScrollBy rvfiScroll 1
 appEvent (T.VtyEvent (V.EvKey V.KUp []))     = M.vScrollBy rvfiScroll (-1)
 appEvent ev = do
     zoom edit $ E.handleEditorEvent ev
 
-initialiseState :: Int -> IO St
-initialiseState memlen = do
+initialiseState :: Int -> Maybe ByteString -> IO St
+initialiseState memlen mdata = do
     v <- MV.replicate memlen 0
+    case mdata of
+      Just bs -> do
+        when (BS.length bs > memlen) $
+          error "Data too big for mem"
+        forM_ [0..BS.length bs - 1] $ \i -> do
+          MV.write v i (BS.index bs i)
+      Nothing -> pure ()
     pure $ St
       (E.editor Edit Nothing "")
       (signalAutomaton @System expandCore)
@@ -368,6 +390,9 @@ handleToMem ToMem{..} st = do
 
 main :: IO ()
 main = do
-    initialState <- initialiseState 1024
-    let _ = signalAutomaton @System expandCore
+    args <- getArgs
+    memdat <- case args of
+      [bin] -> Just <$> BS.readFile bin
+      _ -> pure Nothing
+    initialState <- initialiseState 1024 memdat
     void $ M.defaultMain theApp initialState

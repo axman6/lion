@@ -108,7 +108,8 @@ executable lion-tui
         clash-prelude,
         word-wrap,
         vector,
-        arrows
+        arrows,
+        bytestring
 
     ghc-options:      -threaded
 
