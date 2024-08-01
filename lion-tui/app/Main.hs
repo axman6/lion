@@ -14,7 +14,7 @@
 
 module Main where
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Lens.Micro
 import Lens.Micro.TH
 import Lens.Micro.Mtl
@@ -51,14 +51,16 @@ import Text.Wrap
       FillStrategy(FillIndent),
       defaultWrapSettings )
 import Lion.Rvfi (Rvfi(..), mkRvfi, RvfiCsr(..))
-import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, (<=>), padBottom, Padding (..))
-import GHC.Word (Word32)
+import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, padBottom, Padding (..))
+import GHC.Word (Word8, Word32)
 import Data.Vector.Mutable (IOVector)
 import Data.Vector.Mutable qualified as MV
-import Lion.Core (core, FromCore(..), defaultCoreConfig, ToMem(..), MemoryAccess(..))
+import Lion.Core (core, FromCore(..), defaultCoreConfig, ToMem(..))
 import Clash.Explicit.Prelude (System)
 import Control.Arrow.Transformer.Automaton (Automaton (Automaton))
 import Control.Monad.IO.Class (MonadIO (..))
+import Lion.Instruction (parseInstr)
+import Data.Bits (Bits(..))
 
 data Name = Edit
           | EditLines
@@ -69,7 +71,7 @@ data St = St
   { _edit      :: E.Editor String Name
   , _automaton :: Automaton (->) (BitVector 32) (Maybe ToMem, Rvfi)
   , _rvfi      :: Rvfi
-  , _memVec    :: IOVector Word32
+  , _memVec    :: IOVector Word8
   , _memResult :: BitVector 32
   , _memOut    :: Maybe ToMem
   }
@@ -105,6 +107,7 @@ drawRvfiTable St{_rvfi = Rvfi{..}, ..}  =
     , drawRow @"valid"     52 _rvfiValid
     , drawRow @"order"     42 _rvfiOrder
     , drawRow @"insn"      52 _rvfiInsn
+    , drawInst @"insn"        _rvfiInsn
     , drawRow @"trap"      52 _rvfiTrap
     , drawRow @"halt"      52 _rvfiHalt
     , drawRow @"intr"      52 _rvfiIntr
@@ -186,6 +189,14 @@ drawRow :: forall l v n ll.
 drawRow w v =
   [ str (symbolVal @l (Proxy :: Proxy l))
   , hLimit w $ strWrapWith prefixWrapping (show v)
+  ]
+
+drawInst :: forall l n. KnownSymbol l => BitVector 32 -> [T.Widget n]
+drawInst i =
+  [ str (symbolVal @l Proxy)
+  , case parseInstr i of
+      Left _ -> str "(invalid)"
+      Right isn -> str (show isn)
   ]
 
 
@@ -320,12 +331,38 @@ handleToMem ToMem{..} st = do
   val <- case memWrite of
     Nothing
       |  memAddress >= 0
-      && fromIntegral memAddress < MV.length mem
-      -> liftIO $ MV.read (_memVec st) (fromIntegral memAddress)
+      && fromIntegral (memAddress+3) < MV.length mem
+      -> liftIO $ do
+        a <- MV.read (_memVec st) (fromIntegral memAddress+0)
+        b <- MV.read (_memVec st) (fromIntegral memAddress+1)
+        c <- MV.read (_memVec st) (fromIntegral memAddress+2)
+        d <- MV.read (_memVec st) (fromIntegral memAddress+3)
+        pure (   fromIntegral a `shiftL` 0
+             .|. fromIntegral b `shiftL` 8
+             .|. fromIntegral c `shiftL` 16
+             .|. fromIntegral d `shiftL` 24 :: Word32)
     Just wr
       |  memAddress >= 0
-      && fromIntegral memAddress < MV.length mem
-      -> 0 <$ liftIO (MV.write mem (fromIntegral memAddress) (fromIntegral wr))
+      && fromIntegral (memAddress+3) < MV.length mem
+      -> liftIO $ do
+        let w32 = fromIntegral wr :: Word32
+        when (testBit memByteMask 0) $
+          MV.write mem
+                   (fromIntegral memAddress+0)
+                   (fromIntegral w32)
+        when (testBit memByteMask 1) $
+          MV.write mem
+                   (fromIntegral memAddress+1)
+                   (fromIntegral (w32 `unsafeShiftR` 8))
+        when (testBit memByteMask 2) $
+          MV.write mem
+                   (fromIntegral memAddress+2)
+                   (fromIntegral (w32 `unsafeShiftR` 16))
+        when (testBit memByteMask 3) $
+          MV.write mem
+                   (fromIntegral memAddress+3)
+                   (fromIntegral (w32 `unsafeShiftR` 24))
+        pure 0
     _ -> pure 0
   pure st {_memResult = fromIntegral val}
 
