@@ -33,7 +33,7 @@ import Brick.Widgets.Core
   , str
   , visible
   , viewport
-  , withDefAttr, strWrapWith, withVScrollBars
+  , withDefAttr, strWrapWith, withVScrollBars, withHScrollBars
   )
 import qualified Brick.Widgets.Center as C
 import qualified Brick.Widgets.Edit as E
@@ -51,7 +51,7 @@ import Text.Wrap
       FillStrategy(FillIndent),
       defaultWrapSettings )
 import Lion.Rvfi (Rvfi(..), mkRvfi, RvfiCsr(..))
-import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, padBottom, Padding (..))
+import Brick (ViewportType(..), VScrollBarOrientation (..), ViewportScroll, viewportScroll, padBottom, Padding (..), HScrollBarOrientation (..))
 import GHC.Word (Word8, Word32)
 import Data.Vector.Mutable (IOVector)
 import Data.Vector.Mutable qualified as MV
@@ -86,8 +86,10 @@ drawUI st = [rvfiView]
     where
         _e = renderWithLineNumbers (st^.edit)
         _ui = C.center . hLimit 50 . vLimit 10
-        rvfiView = withVScrollBars OnRight
-             $ viewport RvfiView Vertical
+        rvfiView =
+               withHScrollBars OnBottom
+             $ withVScrollBars OnRight
+             $ viewport RvfiView Both
              $ drawRvfi st
 
 drawRvfi :: St -> T.Widget Name
@@ -295,6 +297,8 @@ appEvent (T.VtyEvent (V.EvKey (V.KChar 'q') [])) =
     M.halt
 appEvent (T.VtyEvent (V.EvKey V.KDown []))   = M.vScrollBy rvfiScroll 1
 appEvent (T.VtyEvent (V.EvKey V.KUp []))     = M.vScrollBy rvfiScroll (-1)
+appEvent (T.VtyEvent (V.EvKey V.KRight []))  = M.hScrollBy rvfiScroll 1
+appEvent (T.VtyEvent (V.EvKey V.KLeft []))   = M.hScrollBy rvfiScroll (-1)
 appEvent ev = do
     zoom edit $ E.handleEditorEvent ev
 
